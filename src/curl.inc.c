@@ -6,7 +6,9 @@
 #include <string.h>
 #include <errno.h>
 
-#if defined(R2__WINDOWS__)
+#if defined(__wasi__)
+#include <unistd.h>
+#elif defined(R2__WINDOWS__)
 #include <windows.h>
 #include <io.h>
 #include <fcntl.h>
@@ -30,7 +32,11 @@ char *curl_post_capture(const char *url, const char *msg, int *exit_code_out) {
 	char *buf = NULL;
 	size_t len = 0;
 	int exit_code = -1;
-#if R2__WINDOWS__
+#if defined(__wasi__)
+	/* WASI cannot spawn processes, so the curl-based HTTP client is unavailable */
+	(void)len;
+	errno = ENOTSUP;
+#elif R2__WINDOWS__
 	SECURITY_ATTRIBUTES sa;
 	sa.nLength = sizeof (SECURITY_ATTRIBUTES);
 	sa.lpSecurityDescriptor = NULL;

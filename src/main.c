@@ -10,7 +10,12 @@
 #define R_CORE_LOADLIBS_ALL R_LIB_LOAD_ALL
 #endif
 
-#if R2__UNIX__
+#if defined(__wasi__)
+/* WASI has no sigaction; interrupts are handled by the host runtime */
+void setup_signals(void) {
+	/* nothing to do */
+}
+#elif R2__UNIX__
 #include <signal.h>
 /* Signal handling moved from r2mcp.c */
 static void signal_handler(int signum) {
@@ -439,7 +444,7 @@ int r2mcp_main(int argc, const char **argv) {
 	}
 	r_list_free (cmds);
 	r2mcp_running_set (1);
-#if R2__UNIX__
+#if R2__UNIX__ && !defined(__wasi__)
 	/* Install signals AFTER r_core_new so we override any handlers it may
 	 * have hooked. r2mcp_state_init also calls r_cons_thready to disable
 	 * future cons re-hooking. */
