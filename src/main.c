@@ -42,16 +42,22 @@ void setup_signals(void) {
 void r2mcp_help(void) {
 	const char help_text[] =
 		"Usage: r2mcp [-flags]\n"
+#ifndef __wasi__
 		" -A         generate and require a random HTTP Bearer auth token\n"
+#endif
 		" -C [mode]  content mode: text (default), json, structured, both\n"
+#ifndef __wasi__
 		" -a [token] require HTTP Authorization: Bearer [token] (use 'random' to generate)\n"
+#endif
 		" -c [cmd]   run those commands before entering the mcp loop\n"
 		" -d [pdc]   select a different decompiler (pdc by default)\n"
 		" -E [tool]  exclude the specified tool (repeatable)\n"
 		" -e [tool]  enable only the specified tool (repeatable)\n"
 		" -g [grain] sandbox grain mask (disk,files,exec,socket,network,environ,all,none)\n"
 		" -h         show this help\n"
+#ifndef __wasi__
 		" -H [addr:]port start an HTTP MCP server (default address: 127.0.0.1)\n"
+#endif
 		" -i         ignore analysis level specified in analyze calls\n"
 		" -l [file]  append debug logs to this file\n"
 		" -L         enable session management tools (list/open/close sessions)\n"
@@ -60,15 +66,24 @@ void r2mcp_help(void) {
 		" -N         do not load any prompts\n"
 		" -p         permissive tools: allow calling non-listed tools\n"
 		" -P [dir]   colon-separated list of directories with prompts\n"
+#ifndef __wasi__
 		" -r         enable the dangerous run_* tools\n"
+#endif
 		" -R         enable read-only mode (expose only non-mutating tools)\n"
 		" -s [dir]   enable sandbox mode; only allow files under [dir]\n"
+#ifndef __wasi__
 		" -S [url]   enable supervisor control; connect to svc at [url]\n"
+#endif
 		" -t         list available tools and exit (-ht for mode legend)\n"
 		" -T [tests] run DSL tests and exit\n"
+#ifndef __wasi__
 		" -u [url]   use remote r2 webserver base URL (HTTP r2pipe client mode)\n"
+#endif
 		" -v         show version\n"
-#if R2MCP_HAS_HTTP_HEADERS
+#if defined(__wasi__)
+		"\nUnavailable flags in WASI (require sockets or subprocesses):\n"
+		" -A -a -H -r -S -u -X\n";
+#elif R2MCP_HAS_HTTP_HEADERS
 		" -X [n[:t]] enable HTTP X-Session-ID multiplexing (max n sessions, t s idle timeout; default 8:600)\n";
 #else
 		" -X [n[:t]] enable HTTP X-Session-ID multiplexing (requires radare2 ABI >= 91; disabled in this build)\n";
