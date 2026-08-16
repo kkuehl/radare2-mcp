@@ -488,6 +488,70 @@ run_numeric_string_regression() {
 	}
 }
 
+run_list_filter_regressions() {
+	local req="$TMPDIR/list-filter.req"
+	local resp="$TMPDIR/list-filter.resp"
+	local meta="$TMPDIR/list-filter.meta.jsonl"
+	local tools="$TMPDIR/list-filter.tools"
+	local marker="__R2MCP_NO_FILTER_MATCH__"
+	local id=10
+	: > "$req"
+	: > "$meta"
+
+	append_request "$req" 1 initialize '{"capabilities":{},"clientInfo":{"name":"testsuite","version":"1"}}'
+	append_notification "$req" notifications/initialized '{}'
+	append_tool_call "$req" 2 open_file "$(jq -cn --arg file "$TEST_OBJECT" '{file_path:$file}')"
+	append_tool_call "$req" 3 list_functions '{"filter":"r2mcp_sandbox_check"}'
+	append_tool_call "$req" 4 list_functions '{"filter":"r2mcp_sandbox_.*","count":true}'
+	append_tool_call "$req" 5 list_symbols '{"filter":"r2mcp_sandbox_.*","count":true}'
+
+	jq -r '.[] | select((.inputSchema.properties // {}) | has("filter")) | .name' "$NORMAL_CATALOG" > "$tools"
+	while IFS= read -r tool; do
+		local args
+		case "$tool" in
+		list_files)
+			args=$(jq -cn --arg filter "$marker" --arg path "$TEST_DIR" '{filter:$filter,path:$path}')
+			;;
+		list_methods)
+			args=$(jq -cn --arg filter "$marker" '{filter:$filter,classname:"__no_such_class__"}')
+			;;
+		*)
+			args=$(jq -cn --arg filter "$marker" '{filter:$filter}')
+			;;
+		esac
+		append_tool_call "$req" "$id" "$tool" "$args"
+		jq -cn --argjson id "$id" --arg tool "$tool" '{id:$id,tool:$tool}' >> "$meta"
+		id=$((id + 1))
+	done < "$tools"
+	[ -s "$meta" ] || fail "list filters: catalog exposed no filter-capable tools"
+
+	run_session "$req" "$resp"
+
+	printf '%s\n' "$(response_by_id "$resp" 3)" | jq -e '.result.content[0].text | contains("sym.r2mcp_sandbox_check")' >/dev/null 2>&1 || {
+		fail "list_functions filter: single matching row was lost, got $(response_by_id "$resp" 3)"
+	}
+	printf '%s\n' "$(response_by_id "$resp" 4)" | jq -e '.result.content[0].text == "1"' >/dev/null 2>&1 || {
+		fail "list_functions filter count: regex count differs from list results, got $(response_by_id "$resp" 4)"
+	}
+	printf '%s\n' "$(response_by_id "$resp" 5)" | jq -e '.result.content[0].text == "1"' >/dev/null 2>&1 || {
+		fail "list_symbols filter count: regex count differs from list results, got $(response_by_id "$resp" 5)"
+	}
+
+	while IFS= read -r case_json; do
+		local case_id
+		local tool
+		local expected="No results matched the given filter."
+		case_id=$(printf '%s\n' "$case_json" | jq -r '.id')
+		tool=$(printf '%s\n' "$case_json" | jq -r '.tool')
+		if [ "$tool" = "list_functions" ]; then
+			expected="No functions matched the given filter."
+		fi
+		printf '%s\n' "$(response_by_id "$resp" "$case_id")" | jq -e --arg expected "$expected" '.result.content[0].text == $expected' >/dev/null 2>&1 || {
+			fail "$tool filter: expected a meaningful no-match response, got $(response_by_id "$resp" "$case_id")"
+		}
+	done < "$meta"
+}
+
 run_open_session_regression() {
 	local port="19392"
 	local good_url="http://127.0.0.1:$port/cmd/"
@@ -770,6 +834,7 @@ TEST_DIR="$TMPDIR/work"
 TEST_FILE="$TEST_DIR/ls.bin"
 TEST_FILE2="$TEST_DIR/cat.bin"
 TEST_SCRIPT="$TEST_DIR/script.r2"
+TEST_OBJECT="$PWD/src/r2mcp.o"
 mkdir -p "$TEST_DIR"
 cp /bin/ls "$TEST_FILE"
 cp /bin/cat "$TEST_FILE2"
@@ -823,6 +888,7 @@ run_repeated_open_file_regression
 run_different_open_file_regression
 run_open_file_baddr_regression
 run_numeric_string_regression
+run_list_filter_regressions
 run_close_file_regression
 run_open_session_regression
 run_http_sandbox_grain_regression

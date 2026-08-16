@@ -112,38 +112,10 @@ static char *tool_cmd_response(char *res);
 static char *tool_cmd_response_paginated(ServerState *ss, char *res, RJson *tool_args);
 static char *filter_lines_by_regex(const char *input, const char *pattern);
 
-// Filter strings forwarded to r2's `~` grep must not contain characters that
-// would break command parsing (newlines, backticks, quotes, semicolons, etc.).
-static bool filter_safe_for_r2grep(const char *filter) {
-	if (R_STR_ISEMPTY (filter)) {
-		return true;
-	}
-	for (const char *p = filter; *p; p++) {
-		unsigned char c = (unsigned char)*p;
-		if (c < 0x20 || c == 0x7f) {
-			return false;
-		}
-		if (strchr ("`'\";|@&", *p)) {
-			return false;
-		}
-	}
-	return true;
-}
-
 // Count results of a r2 listing command using r2's native grep facility.
-// Without a filter this becomes "cmd~?" (line count). With a filter it
-// becomes "cmd~filter?" (count of matching lines). Returns -1 if the filter
-// cannot be safely forwarded to r2.
-static int r2_grep_count(ServerState *ss, const char *cmd, const char *filter) {
-	char *res;
-	if (R_STR_ISNOTEMPTY (filter)) {
-		if (!filter_safe_for_r2grep (filter)) {
-			return -1;
-		}
-		res = r2mcp_cmdf (ss, "%s~%s?", cmd, filter);
-	} else {
-		res = r2mcp_cmdf (ss, "%s~?", cmd);
-	}
+// Filtered counts are done locally because r2's `~` syntax is not a regex.
+static int r2_grep_count(ServerState *ss, const char *cmd) {
+	char *res = r2mcp_cmdf (ss, "%s~?", cmd);
 	int n = R_STR_ISEMPTY (res)? 0: atoi (r_str_trim_head_ro (res));
 	free (res);
 	if (n < 0) {
@@ -194,6 +166,11 @@ static char *list_text_response(ServerState *ss, char *res, RJson *tool_args) {
 		free (res);
 		return count_response (n);
 	}
+	const char *filter = tool_args? r_json_get_str (tool_args, "filter"): NULL;
+	if (R_STR_ISNOTEMPTY (filter) && R_STR_ISEMPTY (res)) {
+		free (res);
+		return jsonrpc_tooltext_response ("No results matched the given filter.");
+	}
 	return tool_cmd_response_paginated (ss, res, tool_args);
 }
 
@@ -204,8 +181,8 @@ static char *list_text_response(ServerState *ss, char *res, RJson *tool_args) {
 static char *list_cmd_response(ServerState *ss, RJson *tool_args, const char *cmd) {
 	bool count_only = tool_args && rjson_get_bool_flag (tool_args, "count");
 	const char *filter = tool_args? r_json_get_str (tool_args, "filter"): NULL;
-	if (count_only && (R_STR_ISEMPTY (filter) || filter_safe_for_r2grep (filter))) {
-		int n = r2_grep_count (ss, cmd, filter);
+	if (count_only && R_STR_ISEMPTY (filter)) {
+		int n = r2_grep_count (ss, cmd);
 		if (n >= 0) {
 			return count_response (n);
 		}
@@ -518,24 +495,13 @@ static char *tool_list_functions(ServerState *ss, RJson *tool_args) {
 	bool count_only = rjson_get_bool_flag (tool_args, "count");
 
 	const char *filter = r_json_get_str (tool_args, "filter");
-	if (filter && strchr (filter, '/')) {
-		filter = NULL;
-	}
 
-	// Fast path: when the caller only wants a count and no `only_named`
-	// filtering is required, use r2's native counters (`aflc` or `aflq~filter?`).
-	// Filters with characters that can't be forwarded to r2 grep (e.g. `|`)
-	// fall through to the slow path below so we still return a correct count.
-	bool filter_grep_ok = R_STR_ISEMPTY (filter) || filter_safe_for_r2grep (filter);
-	if (count_only && !only_named && filter_grep_ok) {
-		int n;
-		if (R_STR_ISNOTEMPTY (filter)) {
-			n = r2_grep_count (ss, "aflq", filter);
-		} else {
-			char *cnt = r2mcp_cmd (ss, "aflc");
-			n = R_STR_ISEMPTY (cnt)? 0: atoi (r_str_trim_head_ro (cnt));
-			free (cnt);
-		}
+	// Fast path for an unfiltered count. Filtered counts must use the same regex
+	// path as filtered lists so their results cannot disagree.
+	if (count_only && !only_named && R_STR_ISEMPTY (filter)) {
+		char *cnt = r2mcp_cmd (ss, "aflc");
+		int n = R_STR_ISEMPTY (cnt)? 0: atoi (r_str_trim_head_ro (cnt));
+		free (cnt);
 		if (n == 0) {
 			// nothing yet, try implicit analysis once
 			free (r2mcp_cmd (ss, "aaa"));
@@ -543,13 +509,9 @@ static char *tool_list_functions(ServerState *ss, RJson *tool_args) {
 			if (implicit_level > ss->rstate->analyze_level) {
 				ss->rstate->analyze_level = implicit_level;
 			}
-			if (R_STR_ISNOTEMPTY (filter)) {
-				n = r2_grep_count (ss, "aflq", filter);
-			} else {
-				char *cnt = r2mcp_cmd (ss, "aflc");
-				n = R_STR_ISEMPTY (cnt)? 0: atoi (r_str_trim_head_ro (cnt));
-				free (cnt);
-			}
+			cnt = r2mcp_cmd (ss, "aflc");
+			n = R_STR_ISEMPTY (cnt)? 0: atoi (r_str_trim_head_ro (cnt));
+			free (cnt);
 		}
 		if (n < 0) {
 			n = 0;
@@ -612,20 +574,21 @@ static char *tool_list_functions(ServerState *ss, RJson *tool_args) {
 		return tool_cmd_response (strdup (msg));
 	}
 	if (count_only) {
-		// only_named path: count remaining rows minus the 2 table header lines
-		int total = r_str_char_count (res, '\n');
-		int n = R_STR_ISNOTEMPTY (filter)? total: total - 2;
+		int header_lines = R_STR_ISNOTEMPTY (filter)? 0: 2;
+		int n = r_str_char_count (res, '\n') + 1 - header_lines;
 		if (n < 0) {
 			n = 0;
 		}
 		free (res);
 		return count_response (n);
 	}
-	// Apply pagination, offset by 2 to skip the header lines
-	int total_lines = r_str_char_count (res, '\n') - 2;
+	// Regex filtering removes the table headers, so only skip them when the
+	// unfiltered table is being paginated.
+	int header_lines = R_STR_ISNOTEMPTY (filter)? 0: 2;
+	int total_lines = r_str_char_count (res, '\n') + 1 - header_lines;
 	int page_size = (max_length < 1)? total_lines: max_length;
 	char cursor_buf[32];
-	snprintf (cursor_buf, sizeof (cursor_buf), "%d", start + 2);
+	snprintf (cursor_buf, sizeof (cursor_buf), "%d", start + header_lines);
 	char *next_cursor = NULL;
 	bool has_more = false;
 	char *paginated = paginate_text_by_lines (res, cursor_buf, page_size, &has_more, &next_cursor);
@@ -776,38 +739,12 @@ static char *tool_get_function_prototype(ServerState *ss, RJson *tool_args) {
 }
 
 static char *tool_list_strings(ServerState *ss, RJson *tool_args) {
-	const char *filter = r_json_get_str (tool_args, "filter");
 	const char *strings_cmd = ss->frida_mode? ":iz": "izqq";
-	if (rjson_get_bool_flag (tool_args, "count") && (R_STR_ISEMPTY (filter) || filter_safe_for_r2grep (filter))) {
-		int n = r2_grep_count (ss, strings_cmd, filter);
-		if (n >= 0) {
-			return count_response (n);
-		}
-	}
-	char *cmd_result = r2mcp_cmd (ss, strings_cmd);
-	return list_text_response (ss, cmd_result, tool_args);
+	return list_cmd_response (ss, tool_args, strings_cmd);
 }
 
 static char *tool_list_all_strings(ServerState *ss, RJson *tool_args) {
-	const char *filter = r_json_get_str (tool_args, "filter");
-	if (rjson_get_bool_flag (tool_args, "count") && (R_STR_ISEMPTY (filter) || filter_safe_for_r2grep (filter))) {
-		int n = r2_grep_count (ss, "izzzqq", filter);
-		if (n >= 0) {
-			return count_response (n);
-		}
-	}
-	char *cmd_result = r2mcp_cmd (ss, "izzzqq");
-	cmd_result = filter_list_result (cmd_result, tool_args);
-	if (rjson_get_bool_flag (tool_args, "count")) {
-		int n = list_line_count (cmd_result);
-		free (cmd_result);
-		return count_response (n);
-	}
-	if (R_STR_ISEMPTY (cmd_result)) {
-		free (cmd_result);
-		cmd_result = r_str_newf ("Error: No strings with regex %s", filter);
-	}
-	return tool_cmd_response_paginated (ss, cmd_result, tool_args);
+	return list_cmd_response (ss, tool_args, "izzzqq");
 }
 
 static char *tool_analyze(ServerState *ss, RJson *tool_args) {
